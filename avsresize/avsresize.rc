@@ -32,11 +32,11 @@ BEGIN
         BEGIN
             VALUE "Comments", "Scaling, colorspace conversion and dithering filter"
             VALUE "FileDescription", "z.lib for Avisynth+"
-            VALUE "FileVersion", "r5"
+            VALUE "FileVersion", "r7"
             VALUE "InternalName", "AvsResize"
             VALUE "OriginalFilename", "avsresize.dll"
             VALUE "ProductName", "AvsResize"
-            VALUE "ProductVersion", "r5"
+            VALUE "ProductVersion", "r7"
         END
     END
     BLOCK "VarFileInfo"

@@ -1,5 +1,6 @@
 #include <regex>
-#include <assert.h>
+#include <cassert>
+#include <array>
 
 #ifdef _WIN32
 #include "avisynth.h"
@@ -199,13 +200,19 @@ static inline void muldivRational(int64_t* num, int64_t* den, int64_t mul, int64
 
 void propagate_sar(const AVSMap* src_props, AVSMap* dst_props, const zimg_image_format& src_format, const zimg_image_format& dst_format, IScriptEnvironment* env)
 {
-    int64_t sar_num = 0;
-    int64_t sar_den = 0;
+    int64_t sar_num = [&]() {
+        if (env->propNumElements(src_props, "_SARNum") > 0)
+            return env->propGetInt(src_props, "_SARNum", 0, nullptr);
+        else
+            return static_cast<int64_t>(0);
+    }();
 
-    if (env->propNumElements(src_props, "_SARNum") > 0)
-        sar_num = env->propGetInt(src_props, "_SARNum", 0, nullptr);
-    if (env->propNumElements(dst_props, "_SARDen") > 0)
-        sar_den = env->propGetInt(dst_props, "_SARDen", 0, nullptr);
+    int64_t sar_den = [&]() {
+        if (env->propNumElements(dst_props, "_SARDen") > 0)
+            return env->propGetInt(dst_props, "_SARDen", 0, nullptr);
+        else
+            return static_cast<int64_t>(0);
+    }();
 
     if (sar_num <= 0 || sar_den <= 0)
     {
@@ -222,7 +229,7 @@ void propagate_sar(const AVSMap* src_props, AVSMap* dst_props, const zimg_image_
     }
 }
 
-zimgxx::zimage_format format_from_vi(const VideoInfo& vi, const AVSMap* props, bool v8, IScriptEnvironment* env)
+zimgxx::zimage_format format_from_vi(const VideoInfo& vi)
 {
     zimgxx::zimage_format format;
 
@@ -233,7 +240,7 @@ zimgxx::zimage_format format_from_vi(const VideoInfo& vi, const AVSMap* props, b
 
     format.width = vi.width;
     format.height = vi.height;
-    bool has_alpha = vi.NumComponents() == 4;
+    const bool has_alpha = (vi.NumComponents() == 4);
 
     switch (vi.ComponentSize())
     {
@@ -243,47 +250,15 @@ zimgxx::zimage_format format_from_vi(const VideoInfo& vi, const AVSMap* props, b
         default: assert_unexpected(); break;
     }
 
-    bool matrix, transfer, primaries, colorrange, chromaloc;
-    if (v8)
-    {
-        matrix = env->propNumElements(props, "_Matrix") > 0;
-        transfer = env->propNumElements(props, "_Transfer") > 0;
-        primaries = env->propNumElements(props, "_Primaries") > 0;
-        colorrange = env->propNumElements(props, "_ColorRange") > 0;
-        chromaloc = env->propNumElements(props, "_ChromaLocation") > 0;
-    }
-    else
-        matrix = transfer = primaries = colorrange = chromaloc = false;
-
     if (vi.IsRGB())
     {
         format.color_family = ZIMG_COLOR_RGB;
         format.alpha = !has_alpha ? ZIMG_ALPHA_NONE : ZIMG_ALPHA_PREMULTIPLIED;
 
-        if (v8)
-        {
-            if (matrix)
-                import_frame_props_matrix(props, &format, env);
-            else
-                format.matrix_coefficients = ZIMG_MATRIX_RGB;
-
-            if (transfer)
-                import_frame_props_transfer(props, &format, env);
-            if (primaries)
-                import_frame_props_primaries(props, &format, env);
-
-            if (colorrange)
-                import_frame_props_colorrange(props, &format, env);
-            else
-                format.pixel_range = ZIMG_RANGE_FULL;
-        }
-        else
-        {
-            format.matrix_coefficients = ZIMG_MATRIX_RGB;
-            format.pixel_range = ZIMG_RANGE_FULL;
-        }
+        format.matrix_coefficients = ZIMG_MATRIX_RGB;
+        format.pixel_range = ZIMG_RANGE_FULL;
     }
-    else if (!vi.IsRGB())
+    else
     {
         if (vi.IsY())
             format.color_family = ZIMG_COLOR_GREY;
@@ -292,43 +267,16 @@ zimgxx::zimage_format format_from_vi(const VideoInfo& vi, const AVSMap* props, b
             format.color_family = ZIMG_COLOR_YUV;
             format.subsample_w = vi.GetPlaneWidthSubsampling(PLANAR_U);
             format.subsample_h = vi.GetPlaneHeightSubsampling(PLANAR_U);
-            format.alpha = !has_alpha ? ZIMG_ALPHA_NONE : ZIMG_ALPHA_PREMULTIPLIED;
+            format.alpha = (!has_alpha) ? ZIMG_ALPHA_NONE : ZIMG_ALPHA_PREMULTIPLIED;
         }
 
-        if (v8)
-        {
-            if (matrix)
-                import_frame_props_matrix(props, &format, env);
-            else
-                format.matrix_coefficients = ZIMG_MATRIX_170M;
-
-            if (transfer)
-                import_frame_props_transfer(props, &format, env);
-            if (primaries)
-                import_frame_props_primaries(props, &format, env);
-
-            if (colorrange)
-                import_frame_props_colorrange(props, &format, env);
-            else
-                format.pixel_range = ZIMG_RANGE_LIMITED;
-
-            if (chromaloc)
-                import_frame_props_chromaloc(props, &format, env);
-        }
-        else
-        {
-            format.matrix_coefficients = ZIMG_MATRIX_170M;
-            format.pixel_range = ZIMG_RANGE_LIMITED;
-        }
+        format.matrix_coefficients = ZIMG_MATRIX_170M;
+        format.pixel_range = ZIMG_RANGE_LIMITED;
     }
-    else
-        assert_unexpected();
 
     format.depth = vi.BitsPerComponent();
 
     // TODO: support interlaced video through dual filter graphs.
-    if (v8 && env->propNumElements(props, "_FieldBased") > 0 && env->propGetInt(props, "_FieldBased", 0, nullptr) > 0)
-        throw_error("clip must be frame-based");
     if (vi.IsFieldBased())
         throw_error("clip must be frame-based");
 
@@ -393,9 +341,8 @@ class AvsResize : public IClip
     PClip m_src;
     VideoInfo m_src_vi;
     VideoInfo m_vi;
+    bool v8;
     
-    zimgxx::zimage_format src_params;
-    zimgxx::zimage_format dst_params;
     zimgxx::FilterGraph m_graph;
     std::unique_ptr<void, AlignedDelete> m_tmp;
 
@@ -405,27 +352,36 @@ public:
         zimgxx::zimage_format src_format;
         zimgxx::zimage_format dst_format;
         zimgxx::zfilter_graph_builder_params graph_params;
-    };    
+    };
 
-    AvsResize(PClip src, const params &params) :
+    struct args
+    {
+        bool colorsp_def;
+        bool chromal_def;
+        std::vector<std::string> match_cs;
+        std::vector<std::string> match_chrl;
+    };
+
+    params p;
+    args a;
+
+    AvsResize(PClip src, params &params, args &args) :
         m_src{ src },
         m_src_vi(src->GetVideoInfo()),
-        m_vi(vi_from_format(m_src_vi, params.dst_format))
+        m_vi(vi_from_format(m_src_vi, params.dst_format)),
+        p(params),
+        a(args)
     {
-        src_params = params.src_format;
-        dst_params = params.dst_format;
-        m_graph = zimgxx::FilterGraph::build(params.src_format, params.dst_format, &params.graph_params);
-        size_t tmp_size = m_graph.get_tmp_size();
-        m_tmp.reset(aligned_new(tmp_size, 32));
-    }
-
-    static bool has_at_least_v8()
-    {
-        bool has_at_least_v8 = true;
+        v8 = true;
         try { g_saved_env->CheckVersion(8); }
-        catch (const AvisynthError&) { has_at_least_v8 = false; }
-        
-        return has_at_least_v8;
+        catch (const AvisynthError&) { v8 = false; }
+
+        if (!v8)
+        {
+            m_graph = zimgxx::FilterGraph::build(params.src_format, params.dst_format, &params.graph_params);
+            size_t tmp_size = m_graph.get_tmp_size();
+            m_tmp.reset(aligned_new(tmp_size, 32));
+        }
     }
 
     PVideoFrame __stdcall GetFrame(int n, IScriptEnvironment *env) override try
@@ -433,51 +389,165 @@ public:
         g_saved_env = env;
 
         PVideoFrame src_frame = make_aligned(m_src->GetFrame(n, env), m_src_vi, 32, env);
-        PVideoFrame dst_frame = env->NewVideoFrame(m_vi);
-
         const unsigned src_num_planes = m_src_vi.NumComponents();
-        const unsigned dst_num_planes = m_vi.NumComponents();
 
-        const int * src_plane_order = m_src_vi.IsRGB() ? PLANE_ORDER_RGB : PLANE_ORDER_YUV;
-        const int * dst_plane_order = m_vi.IsRGB() ? PLANE_ORDER_RGB : PLANE_ORDER_YUV;
-
-        zimgxx::zimage_buffer_const src_buf;
-        zimgxx::zimage_buffer dst_buf;
-
-        for (unsigned p = 0; p < src_num_planes; ++p)
+        if (!v8)
         {
-            src_buf.data(p) = src_frame->GetReadPtr(src_plane_order[p]);
-            src_buf.stride(p) = src_frame->GetPitch(src_plane_order[p]);
-            src_buf.mask(p) = ZIMG_BUFFER_MAX;
+            PVideoFrame dst_frame = env->NewVideoFrame(m_vi);
+            
+            const unsigned dst_num_planes = m_vi.NumComponents();
+            const int* src_plane_order = m_src_vi.IsRGB() ? PLANE_ORDER_RGB : PLANE_ORDER_YUV;
+            const int* dst_plane_order = m_vi.IsRGB() ? PLANE_ORDER_RGB : PLANE_ORDER_YUV;
+
+            zimgxx::zimage_buffer_const src_buf;
+            zimgxx::zimage_buffer dst_buf;
+
+            for (unsigned p = 0; p < src_num_planes; ++p)
+            {
+                src_buf.data(p) = src_frame->GetReadPtr(src_plane_order[p]);
+                src_buf.stride(p) = src_frame->GetPitch(src_plane_order[p]);
+                src_buf.mask(p) = ZIMG_BUFFER_MAX;
+            }
+
+            for (unsigned p = 0; p < dst_num_planes; ++p)
+            {
+                dst_buf.data(p) = dst_frame->GetWritePtr(dst_plane_order[p]);
+                dst_buf.stride(p) = dst_frame->GetPitch(dst_plane_order[p]);
+                dst_buf.mask(p) = ZIMG_BUFFER_MAX;
+            }
+
+            m_graph.process(src_buf, dst_buf, m_tmp.get());
+
+            return dst_frame;
         }
-
-        for (unsigned p = 0; p < dst_num_planes; ++p)
+        else
         {
-            dst_buf.data(p) = dst_frame->GetWritePtr(dst_plane_order[p]);
-            dst_buf.stride(p) = dst_frame->GetPitch(dst_plane_order[p]);
-            dst_buf.mask(p) = ZIMG_BUFFER_MAX;
-        }
+            const AVSMap* props = env->getFramePropsRO(src_frame);
 
-        m_graph.process(src_buf, dst_buf, m_tmp.get());
+            if (a.colorsp_def)
+            {
+                if (env->propNumElements(props, "_Matrix") > 0)
+                {
+                    if (a.match_cs[1] == "auto")
+                        import_frame_props_matrix(props, &p.src_format, env);
+                    if (a.match_cs[5] == "same")
+                        p.dst_format.matrix_coefficients = p.src_format.matrix_coefficients;
+                }
 
-        if (has_at_least_v8())
-        {
-            env->copyFrameProps(src_frame, dst_frame);
-            AVSMap* dst_props = env->getFramePropsRW(dst_frame);
-            propagate_sar(env->getFramePropsRO(src_frame), dst_props, src_params, dst_params, env);
-            export_frame_props(dst_params, dst_props, env);
+                if (env->propNumElements(props, "_Transfer") > 0)
+                {
+                    if (a.match_cs[2] == "auto" || !a.match_cs[2].length())
+                        import_frame_props_transfer(props, &p.src_format, env);
+                    if (a.match_cs[6] == "same" || !a.match_cs[6].length())
+                        p.dst_format.transfer_characteristics = p.src_format.transfer_characteristics;
+                }
 
-            if (src_params.color_family == ZIMG_COLOR_YUV)
-                if (dst_params.color_family == ZIMG_COLOR_YUV)
-                    env->propSetInt(dst_props, "_ChromaLocation", dst_params.chroma_location, 0);
-                else
-                    env->propDeleteKey(dst_props, "_ChromaLocation");
+                if (env->propNumElements(props, "_Primaries") > 0)
+                {
+                    if (a.match_cs[3] == "auto" || !a.match_cs[3].length())
+                        import_frame_props_primaries(props, &p.src_format, env);
+                    if (a.match_cs[7] == "same" || !a.match_cs[7].length())
+                        p.dst_format.color_primaries = p.src_format.color_primaries;
+                }
+
+                if (env->propNumElements(props, "_ColorRange") > 0)
+                {
+                    if (a.match_cs[4] == "auto" || !a.match_cs[4].length())
+                        import_frame_props_colorrange(props, &p.src_format, env);
+                    if (a.match_cs[8] == "same" || !a.match_cs[8].length())
+                        p.dst_format.pixel_range = p.src_format.pixel_range;
+                }
+            }
             else
-                if (dst_params.color_family == ZIMG_COLOR_YUV && (dst_params.subsample_w || dst_params.subsample_h))
-                    env->propSetInt(dst_props, "_ChromaLocation", dst_params.chroma_location, 0);            
-        }
+            {
+                if (env->propNumElements(props, "_Matrix") > 0)
+                {
+                    import_frame_props_matrix(props, &p.src_format, env);
 
-        return dst_frame;
+                    if (p.src_format.color_family == p.dst_format.color_family)
+                        p.dst_format.matrix_coefficients = p.src_format.matrix_coefficients;
+                }
+
+                if (env->propNumElements(props, "_Transfer") > 0)
+                {
+                    import_frame_props_transfer(props, &p.src_format, env);
+                    p.dst_format.transfer_characteristics = p.src_format.transfer_characteristics;
+                }
+
+                if (env->propNumElements(props, "_Primaries") > 0)
+                {
+                    import_frame_props_primaries(props, &p.src_format, env);
+                    p.dst_format.color_primaries = p.src_format.color_primaries;
+                }
+
+                if (env->propNumElements(props, "_ColorRange") > 0)
+                {
+                    import_frame_props_colorrange(props, &p.src_format, env);
+
+                    if (p.src_format.color_family == p.dst_format.color_family)
+                        p.dst_format.pixel_range = p.src_format.pixel_range;
+                }
+            }
+
+            if (a.chromal_def)
+            {
+                if (env->propNumElements(props, "_ChromaLocation") > 0)
+                {
+                    if (a.match_chrl[1] == "auto")
+                        import_frame_props_chromaloc(props, &p.src_format, env);
+                    if (a.match_chrl[2] == "same")
+                        p.dst_format.chroma_location = p.src_format.chroma_location;
+                }
+            }
+            else
+            {
+                if (env->propNumElements(props, "_ChromaLocation") > 0)
+                {
+                    import_frame_props_chromaloc(props, &p.src_format, env);
+                    p.dst_format.chroma_location = p.src_format.chroma_location;
+                }
+            }
+
+            // TODO: support interlaced video through dual filter graphs.
+            if (env->propNumElements(props, "_FieldBased") > 0 && env->propGetInt(props, "_FieldBased", 0, nullptr) > 0)
+                throw_error("clip must be frame-based");
+
+            m_graph = zimgxx::FilterGraph::build(p.src_format, p.dst_format, &p.graph_params);
+            size_t tmp_size_ = m_graph.get_tmp_size();
+            m_tmp.reset(aligned_new(tmp_size_, 32));
+
+            PVideoFrame dst_frame = env->NewVideoFrameP(m_vi, &src_frame);        
+
+            const unsigned dst_num_planes = m_vi.NumComponents();
+            const int* src_plane_order = m_src_vi.IsRGB() ? PLANE_ORDER_RGB : PLANE_ORDER_YUV;
+            const int* dst_plane_order = m_vi.IsRGB() ? PLANE_ORDER_RGB : PLANE_ORDER_YUV;
+
+            zimgxx::zimage_buffer_const src_buf_;
+            zimgxx::zimage_buffer dst_buf_;
+
+            for (unsigned p = 0; p < src_num_planes; ++p)
+            {
+                src_buf_.data(p) = src_frame->GetReadPtr(src_plane_order[p]);
+                src_buf_.stride(p) = src_frame->GetPitch(src_plane_order[p]);
+                src_buf_.mask(p) = ZIMG_BUFFER_MAX;
+            }
+
+            for (unsigned p = 0; p < dst_num_planes; ++p)
+            {
+                dst_buf_.data(p) = dst_frame->GetWritePtr(dst_plane_order[p]);
+                dst_buf_.stride(p) = dst_frame->GetPitch(dst_plane_order[p]);
+                dst_buf_.mask(p) = ZIMG_BUFFER_MAX;
+            }
+
+            m_graph.process(src_buf_, dst_buf_, m_tmp.get());
+
+            AVSMap* dst_props = env->getFramePropsRW(dst_frame);
+            propagate_sar(props, dst_props, p.src_format, p.dst_format, env);
+            export_frame_props(p.dst_format, dst_props, env);
+            env->propSetInt(dst_props, "_ChromaLocation", p.dst_format.chroma_location, 0);
+
+            return dst_frame;
+        }
     } catch (const std::exception &e)
     {
         throw_error(e.what());
@@ -495,17 +565,9 @@ public:
 
     bool __stdcall GetParity(int n) override { return m_src->GetParity(n); }
 
-    int __stdcall SetCacheHints(int cachehints, int frame_range) noexcept override
+    int __stdcall SetCacheHints(int cachehints, int frame_range) override
     {
-        switch (cachehints)
-        {
-            case CACHE_GETCHILD_CACHE_MODE:
-                return CACHE_COST_MED;
-            case CACHE_GETCHILD_THREAD_MODE:
-                return CACHE_THREAD_CLASS;
-            default:
-                return 0;
-        }
+        return cachehints == CACHE_GET_MTMODE ? MT_NICE_FILTER : 0;
     }
 };
 
@@ -804,21 +866,22 @@ const char CONVERT_SIGNATURE[] =
     OPT(20, b, approximate_gamma);
 #undef OPT
 
-AVSValue __cdecl create_resize(AVSValue args, void *user_data, IScriptEnvironment *env) try
+AVSValue __cdecl create_resize(AVSValue args, void* user_data, IScriptEnvironment* env) try
 {
     g_saved_env = env;
 
     AvsResize::params params;
+    AvsResize::args a;
     PClip src = args[0].AsClip();
-    PVideoFrame clip = src->GetFrame(0, env);
-    const AVSMap* props = env->getFramePropsRO(clip);
-    bool v8 = AvsResize::has_at_least_v8();
 
-    params.src_format = format_from_vi(src->GetVideoInfo(), props, v8, env);
+    params.src_format = format_from_vi(src->GetVideoInfo());
     params.dst_format = params.src_format;
 
     params.dst_format.width = args[1].AsInt(params.src_format.width); // OPT(i, width)
     params.dst_format.height = args[2].AsInt(params.src_format.height); // OPT(i, height)
+
+    a.colorsp_def = args[4].Defined();
+    a.chromal_def = args[5].Defined();
 
     // OPT(s, pixel_type)
     if (args[3].Defined())
@@ -845,11 +908,7 @@ AVSValue __cdecl create_resize(AVSValue args, void *user_data, IScriptEnvironmen
         }
         else
         {
-            if (!v8 || params.src_format.color_family == ZIMG_COLOR_RGB)
-                params.dst_format.matrix_coefficients = ZIMG_MATRIX_170M;
-            else
-                params.dst_format.chroma_location = params.src_format.chroma_location;
-
+            params.dst_format.matrix_coefficients = ZIMG_MATRIX_170M;
             params.dst_format.pixel_range = ZIMG_RANGE_LIMITED;
         }
 
@@ -858,7 +917,7 @@ AVSValue __cdecl create_resize(AVSValue args, void *user_data, IScriptEnvironmen
     }
 
     // OPT(s, colorspace_op)
-    if (args[4].Defined())
+    if (a.colorsp_def)
     {
         // matS[:transS[:primS[:rangeS]]]=>matD[:transD[:primD[:rangeD]]]
         std::regex reg{ R"((\w+)(?::([^:>]+))?(?::([^:>]+))?(?::(\w+))?=>(\w+)(?::([^:>]+))?(?::([^:>]+))?(?::(\w+))?)" };
@@ -868,25 +927,28 @@ AVSValue __cdecl create_resize(AVSValue args, void *user_data, IScriptEnvironmen
         if (!std::regex_match(colorspace_op.cbegin(), colorspace_op.cend(), match, reg))
             env->ThrowError("cannot parse colorspace operation");
 
-        params.src_format.matrix_coefficients = match[1].str() == "auto" ? params.src_format.matrix_coefficients : lookup_matrix(match[1].str());
-        if (match[2].length())
-            params.src_format.transfer_characteristics = match[2].str() == "auto" ? params.src_format.transfer_characteristics : lookup_transfer(match[2].str());
-        if (match[3].length())
-            params.src_format.color_primaries = match[3].str() == "auto" ? params.src_format.color_primaries : lookup_primaries(match[3].str());
-        if (match[4].length())
-            params.src_format.pixel_range = match[4].str() == "auto" ? params.src_format.pixel_range : lookup_range(match[4].str());
+        for (std::string match : match)
+            a.match_cs.emplace_back(match);
 
-        params.dst_format.matrix_coefficients = match[5].str() == "same" ? params.src_format.matrix_coefficients : lookup_matrix(match[5].str());
+        params.src_format.matrix_coefficients = (match[1].str() == "auto") ? params.src_format.matrix_coefficients : lookup_matrix(match[1].str());
+        if (match[2].length())
+            params.src_format.transfer_characteristics = (match[2].str() == "auto") ? params.src_format.transfer_characteristics : lookup_transfer(match[2].str());
+        if (match[3].length())
+            params.src_format.color_primaries = (match[3].str() == "auto") ? params.src_format.color_primaries : lookup_primaries(match[3].str());
+        if (match[4].length())
+            params.src_format.pixel_range = (match[4].str() == "auto") ? params.src_format.pixel_range : lookup_range(match[4].str());
+
+        params.dst_format.matrix_coefficients = (match[5].str() == "same") ? params.src_format.matrix_coefficients : lookup_matrix(match[5].str());
         if (match[6].length())
-            params.dst_format.transfer_characteristics = match[6].str() == "same" ? params.src_format.transfer_characteristics : lookup_transfer(match[6].str());
+            params.dst_format.transfer_characteristics = (match[6].str() == "same") ? params.src_format.transfer_characteristics : lookup_transfer(match[6].str());
         if (match[7].length())
-            params.dst_format.color_primaries = match[7].str() == "same" ? params.src_format.color_primaries : lookup_primaries(match[7].str());
+            params.dst_format.color_primaries = (match[7].str() == "same") ? params.src_format.color_primaries : lookup_primaries(match[7].str());
         if (match[8].length())
-            params.dst_format.pixel_range = match[8].str() == "same" ? params.src_format.pixel_range : lookup_range(match[8].str());
+            params.dst_format.pixel_range = (match[8].str() == "same") ? params.src_format.pixel_range : lookup_range(match[8].str());
     }
 
     // OPT(s, chromaloc_op)
-    if (args[5].Defined())
+    if (a.chromal_def)
     {
         std::regex reg{ R"((\w+)=>(\w+))" };
         std::string chromaloc_op = lower(args[5].AsString());
@@ -895,8 +957,11 @@ AVSValue __cdecl create_resize(AVSValue args, void *user_data, IScriptEnvironmen
         if (!std::regex_match(chromaloc_op.cbegin(), chromaloc_op.cend(), match, reg))
             env->ThrowError("cannot parse chromaloc operation");
 
-        params.src_format.chroma_location = match[1].str() == "auto" ? params.src_format.chroma_location : lookup_chromaloc(match[1].str());
-        params.dst_format.chroma_location = match[2].str() == "same" ? params.src_format.chroma_location : lookup_chromaloc(match[2].str());
+        for (std::string match : match)
+            a.match_chrl.emplace_back(match);
+
+        params.src_format.chroma_location = (match[1].str() == "auto") ? params.src_format.chroma_location : lookup_chromaloc(match[1].str());
+        params.dst_format.chroma_location = (match[2].str() == "same") ? params.src_format.chroma_location : lookup_chromaloc(match[2].str());
     }
 
     // OPT(b, interlaced)
@@ -913,8 +978,8 @@ AVSValue __cdecl create_resize(AVSValue args, void *user_data, IScriptEnvironmen
 
         params.src_format.active_region.left = src_left;
         params.src_format.active_region.top = src_top;
-        params.src_format.active_region.width = src_width > 0 ? src_width : params.src_format.width - src_left + src_width;
-        params.src_format.active_region.height = src_height > 0 ? src_height : params.src_format.height - src_top + src_height;
+        params.src_format.active_region.width = (src_width > 0) ? src_width : params.src_format.width - src_left + src_width;
+        params.src_format.active_region.height = (src_height > 0) ? src_height : params.src_format.height - src_top + src_height;
     }
 
     // OPT(s, resample_filter)
@@ -939,7 +1004,8 @@ AVSValue __cdecl create_resize(AVSValue args, void *user_data, IScriptEnvironmen
         params.graph_params.resample_filter_uv = lookup_filter(filter_name);
         params.graph_params.filter_param_a_uv = param_a;
         params.graph_params.filter_param_b_uv = param_b;
-    } else {
+    }
+    else {
         params.graph_params.resample_filter_uv = params.graph_params.resample_filter;
         params.graph_params.filter_param_a_uv = params.graph_params.filter_param_a;
         params.graph_params.filter_param_b_uv = params.graph_params.filter_param_b;
@@ -948,32 +1014,31 @@ AVSValue __cdecl create_resize(AVSValue args, void *user_data, IScriptEnvironmen
     // OPT(s, dither_type)
     if (args[17].Defined())
         params.graph_params.dither_type = lookup_dither(lower(args[17].AsString()));
-    
+
     // OPT(s, cpu_type)
     if (args[18].Defined())
         params.graph_params.cpu_type = lookup_cpu(lower(args[18].AsString()));
-    
+
     // OPT(f, nominal_luminance)
     if (args[19].Defined())
     {
         double nominal_luminance = args[19].AsFloat(NAN);
 
         params.graph_params.nominal_peak_luminance = nominal_luminance;
-    }
-    
-    params.graph_params.allow_approximate_gamma = 1;
+    }    
 
     // OPT(b, approximate_gamma)
-    if (args[20].Defined())
-    {
-        if (!args[20].AsBool())
-            params.graph_params.allow_approximate_gamma = 0;
-    }
+    if (args[20].Defined() && !args[20].AsBool())
+        params.graph_params.allow_approximate_gamma = 0;
+    else
+        params.graph_params.allow_approximate_gamma = 1;
 
-    return new AvsResize{ src, params };
-} catch (const std::exception &e) {
+    return new AvsResize{ src, params, a };
+}
+catch (const std::exception& e) {
     throw_error(e.what());
-} catch (zimgxx::zerror &e) {
+}
+catch (zimgxx::zerror& e) {
     throw_error(e.msg);
 }
 

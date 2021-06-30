@@ -200,19 +200,8 @@ static inline void muldivRational(int64_t* num, int64_t* den, int64_t mul, int64
 
 void propagate_sar(const AVSMap* src_props, AVSMap* dst_props, const zimg_image_format& src_format, const zimg_image_format& dst_format, IScriptEnvironment* env)
 {
-    int64_t sar_num = [&]() {
-        if (env->propNumElements(src_props, "_SARNum") > 0)
-            return env->propGetInt(src_props, "_SARNum", 0, nullptr);
-        else
-            return static_cast<int64_t>(0);
-    }();
-
-    int64_t sar_den = [&]() {
-        if (env->propNumElements(dst_props, "_SARDen") > 0)
-            return env->propGetInt(dst_props, "_SARDen", 0, nullptr);
-        else
-            return static_cast<int64_t>(0);
-    }();
+    auto sar_num = (env->propNumElements(src_props, "_SARNum") > 0) ? env->propGetInt(src_props, "_SARNum", 0, nullptr) : 0;
+    auto sar_den = (env->propNumElements(dst_props, "_SARDen") > 0) ? env->propGetInt(dst_props, "_SARDen", 0, nullptr) : 0;
 
     if (sar_num <= 0 || sar_den <= 0)
     {
@@ -454,9 +443,22 @@ public:
                 {
                     if (a.match_cs[4] == "auto" || !a.match_cs[4].length())
                         import_frame_props_colorrange(props, &p.src_format, env);
-                    if (a.match_cs[8] == "same" || !a.match_cs[8].length())
+                    if (a.match_cs[8] == "same")
                         p.dst_format.pixel_range = p.src_format.pixel_range;
+                    else if (!a.match_cs[8].length())
+                    {
+                        if (p.src_format.color_family == p.dst_format.color_family)
+                        {
+                            if (p.src_format.color_family == ZIMG_COLOR_RGB)
+                                p.dst_format.pixel_range = p.src_format.pixel_range;
+                            else if (p.src_format.depth < 32 && p.dst_format.depth < 32)
+                                p.dst_format.pixel_range = p.src_format.pixel_range;
+                        }
+                    }
                 }
+
+                if (p.dst_format.color_family == ZIMG_COLOR_YUV && p.dst_format.depth == 32)
+                    p.dst_format.pixel_range = ZIMG_RANGE_FULL;
             }
             else
             {
@@ -485,8 +487,16 @@ public:
                     import_frame_props_colorrange(props, &p.src_format, env);
 
                     if (p.src_format.color_family == p.dst_format.color_family)
-                        p.dst_format.pixel_range = p.src_format.pixel_range;
+                    {
+                        if (p.src_format.color_family == ZIMG_COLOR_RGB)
+                            p.dst_format.pixel_range = p.src_format.pixel_range;
+                        else if (p.src_format.depth < 32 && p.dst_format.depth < 32)
+                            p.dst_format.pixel_range = p.src_format.pixel_range;
+                    }
                 }
+
+                if (p.dst_format.color_family == ZIMG_COLOR_YUV && p.dst_format.depth == 32)
+                    p.dst_format.pixel_range = ZIMG_RANGE_FULL;
             }
 
             if (a.chromal_def)
@@ -525,18 +535,18 @@ public:
             zimgxx::zimage_buffer_const src_buf_;
             zimgxx::zimage_buffer dst_buf_;
 
-            for (unsigned p = 0; p < src_num_planes; ++p)
+            for (int plane = 0; plane < src_num_planes; ++plane)
             {
-                src_buf_.data(p) = src_frame->GetReadPtr(src_plane_order[p]);
-                src_buf_.stride(p) = src_frame->GetPitch(src_plane_order[p]);
-                src_buf_.mask(p) = ZIMG_BUFFER_MAX;
+                src_buf_.data(plane) = src_frame->GetReadPtr(src_plane_order[plane]);
+                src_buf_.stride(plane) = src_frame->GetPitch(src_plane_order[plane]);
+                src_buf_.mask(plane) = ZIMG_BUFFER_MAX;
             }
 
-            for (unsigned p = 0; p < dst_num_planes; ++p)
+            for (int plane = 0; plane < dst_num_planes; ++plane)
             {
-                dst_buf_.data(p) = dst_frame->GetWritePtr(dst_plane_order[p]);
-                dst_buf_.stride(p) = dst_frame->GetPitch(dst_plane_order[p]);
-                dst_buf_.mask(p) = ZIMG_BUFFER_MAX;
+                dst_buf_.data(plane) = dst_frame->GetWritePtr(dst_plane_order[plane]);
+                dst_buf_.stride(plane) = dst_frame->GetPitch(dst_plane_order[plane]);
+                dst_buf_.mask(plane) = ZIMG_BUFFER_MAX;
             }
 
             m_graph.process(src_buf_, dst_buf_, m_tmp.get());
@@ -567,7 +577,7 @@ public:
 
     int __stdcall SetCacheHints(int cachehints, int frame_range) override
     {
-        return cachehints == CACHE_GET_MTMODE ? MT_NICE_FILTER : 0;
+        return cachehints == CACHE_GET_MTMODE ? MT_MULTI_INSTANCE : 0;
     }
 };
 
